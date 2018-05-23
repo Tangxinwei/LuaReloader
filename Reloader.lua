@@ -244,7 +244,7 @@ end
 
 local function _UpdateTable(oldTable, newTable, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth)
 	if ignoredVariant[newTable] then return end
-	if depth > 1 and not newTable.__NeedReload then return end
+	if not replaceData and depth > 1 and not newTable.__NeedReload then return end
 	if visitedData[newTable] then return end
 	visitedData[newTable] = true
 	for key, value in pairs(newTable) do
@@ -260,9 +260,6 @@ local function _UpdateTable(oldTable, newTable, prefix, replaceData, visitedData
 			table.insert(logMsgList, prefix.." value type not match, key "..key.." old:"..tostring(old).." new:"..tostring(value))
 		elseif type(value) == "table" then
 			UpdateTable(old, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
-			if replaceData then
-				oldTable[key] = value
-			end
 		elseif type(value) == "function" then
 			UpdateFunction(old, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
 			oldTable[key] = value
