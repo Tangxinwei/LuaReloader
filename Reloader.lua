@@ -201,12 +201,14 @@ CalcUpvalueTransWithTable = _CalcUpvalueTransWithTable
 CalcUpvalueTransWithFunction = _CalcUpvalueTransWithFunction
 
 local UpdateTable, UpdateFunction
-local function _UpdateFunction(oldF, newF, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth)
+local function _UpdateFunction(oldF, newF, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth)
 	if ignoredVariant[newF] then return end
 	if visitedData[newF] then return end
 	visitedData[newF] = true
 	--设置新函数的env
-	setfenv(newF, oldG)
+	if getfenv(newF) == newEnv then
+		setfenv(newF, oldG)
+	end
 	if oldF then 
 		functionReplaceDict[oldF] = newF
 		--如果能找到以前的函数,那么还是用以前函数的env
@@ -234,34 +236,34 @@ local function _UpdateFunction(oldF, newF, prefix, replaceData, visitedData, tra
 				debug.upvaluejoin(newF, i, transinfo.TargetFunction, transinfo.TargetFunctionIdx)
 			end
 			if type(value) == "function" then
-				UpdateFunction(oldValue, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
+				UpdateFunction(oldValue, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth + 1)
 			elseif type(value) == "table" then
-				UpdateTable(oldValue or {}, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
+				UpdateTable(oldValue or {}, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth + 1)
 			end
 		end
 	end
 end
 
-local function _UpdateTable(oldTable, newTable, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth)
+local function _UpdateTable(oldTable, newTable, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth)
 	if ignoredVariant[newTable] then return end
-	if not replaceData and depth > 1 and not newTable.__NeedReload then return end
+	if depth > 1 and not replaceData and not newTable.__NeedReload then return end
 	if visitedData[newTable] then return end
 	visitedData[newTable] = true
 	for key, value in pairs(newTable) do
 		local old = oldTable[key]
 		if old == nil then
 			if type(value) == "table" then
-				UpdateTable({}, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
+				UpdateTable({}, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth + 1)
 			elseif type(value) == "function" then
-				UpdateFunction(nil, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
+				UpdateFunction(nil, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth + 1)
 			end
 			oldTable[key] = value
 		elseif not CheckIsCompatable(old, value) then
 			table.insert(logMsgList, prefix.." value type not match, key "..key.." old:"..tostring(old).." new:"..tostring(value))
 		elseif type(value) == "table" then
-			UpdateTable(old, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
+			UpdateTable(old, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth + 1)
 		elseif type(value) == "function" then
-			UpdateFunction(old, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, depth + 1)
+			UpdateFunction(old, value, prefix, replaceData, visitedData, transDict, functionReplaceDict, ignoredVariant, oldG, newEnv, depth + 1)
 			oldTable[key] = value
 		else
 			if replaceData then
@@ -273,7 +275,60 @@ end
 UpdateTable = _UpdateTable
 UpdateFunction = _UpdateFunction
 
-local function DoReload(oldEnv, newEnv, oldTable, newTable, replaceData, prefix, functionReplaceDict, oldG, firstIgnored)
+local UpdateFunctionForSimpleReload, UpdateTableForSimpleReload
+local function UpdateValueForSimpleReload(value, newEnv, oldG, flagData)
+	if type(value) == "table" then
+		UpdateTableForSimpleReload(value, newEnv, oldG, flagData)
+	elseif type(value) == "function" then
+		UpdateFunctionForSimpleReload(value, newEnv, oldG, flagData)
+	end
+end
+local function _UpdateTableForSimpleReload(newTable, newEnv, oldG, flagData)
+	if not newTable.__NeedReload then return end
+	if flagData[newTable] then return end
+	flagData[newTable] = 1
+	for key, value in pairs(newTable) do
+		UpdateValueForSimpleReload(value, newEnv, oldG, flagData)
+	end
+end
+local function _UpdateFunctionForSimpleReload(func, newEnv, oldG, flagData)
+	if flagData[func] then return end
+	flagData[func] = 1
+	if getfenv(func) == newEnv then
+		setfenv(func, oldG)
+	end
+	for i = 1, math.huge do
+		local name, value = debug.getupvalue(func, i)
+		if not name then return end
+		UpdateValueForSimpleReload(value, newEnv, oldG, flagData)
+	end
+end
+UpdateFunctionForSimpleReload = _UpdateFunctionForSimpleReload
+UpdateTableForSimpleReload = _UpdateTableForSimpleReload
+
+local function DoReload(oldEnv, newEnv, oldTable, newTable, replaceData, prefix, functionReplaceDict, oldG, firstIgnored, isSimpleReload)
+	if isSimpleReload  and not replaceData then
+		local flagData = {}
+		for key, value in pairs(newEnv) do
+			if type(value) == "function" and oldEnv[key] 
+				and type(oldEnv[key]) == "function" then
+				functionReplaceDict[oldEnv[key]] = value
+			end
+			UpdateValueForSimpleReload(value, newEnv, oldG, flagData)
+			oldEnv[key] = value
+		end
+		if type(oldTable) == "table" and type(newTable) == "table" then
+			for key, value in pairs(newTable) do
+				if type(value) == "function" and oldTable[key]
+					and type(oldTable[key]) == "function" then
+					functionReplaceDict[oldTable[key]] = value
+				end
+				UpdateValueForSimpleReload(value, newEnv, oldG, flagData)
+				oldTable[key] = value
+			end
+		end
+		return
+	end
 	local oldVisitedTable = {}
 	local newVisitedTable = {} 
 	local ignoredVariant = {}
@@ -291,9 +346,7 @@ local function DoReload(oldEnv, newEnv, oldTable, newTable, replaceData, prefix,
 	end
 	if type(oldTable) == "table" then
 		for key, value in pairs(oldTable) do
-			if newTable[key] ~= nil then
-				TraversalByValue(value, oldVisitedTable, ignoredVariant)
-			end
+			TraversalByValue(value, oldVisitedTable, ignoredVariant)
 		end
 	end
 	for _, value in pairs(newEnv) do
@@ -315,9 +368,7 @@ local function DoReload(oldEnv, newEnv, oldTable, newTable, replaceData, prefix,
 	local flagData = {}
 	if type(oldTable) == "table" then
 		for key, value in pairs(oldTable) do
-			if newTable[key] ~= nil then
-				CalcUpvalueByValue(value, oldUpvalueInfo, ignoredVariant, flagData)
-			end
+			CalcUpvalueByValue(value, oldUpvalueInfo, ignoredVariant, flagData)
 		end
 	end
 	for key, value in pairs(oldEnv) do
@@ -351,14 +402,14 @@ local function DoReload(oldEnv, newEnv, oldTable, newTable, replaceData, prefix,
 	--开始执行实际的更新工作了
 	flagData = {}
 	if type(oldTable) == "table" then
-		UpdateTable(oldTable, newTable, prefix, replaceData, flagData, newUpvalueidToOldUpvalueid, functionReplaceDict, ignoredVariant, oldG, 1)
+		UpdateTable(oldTable, newTable, prefix, replaceData, flagData, newUpvalueidToOldUpvalueid, functionReplaceDict, ignoredVariant, oldG, newEnv, 1)
 	end
-	UpdateTable(oldEnv, newEnv, prefix, replaceData, flagData, newUpvalueidToOldUpvalueid, functionReplaceDict, ignoredVariant, oldG, 1)
+	UpdateTable(oldEnv, newEnv, prefix, replaceData, flagData, newUpvalueidToOldUpvalueid, functionReplaceDict, ignoredVariant, oldG, newEnv, 1)
 end
 
 local _IgnoreModules = {
 	"^.*Reloader$",
-	".*Frame.*",
+	"Frame.UEStruct",
 	"table",
 	"string",
 	"coroutine",
@@ -370,6 +421,8 @@ local _IgnoreModules = {
 	"socket.*",
 	"package.*",
 	"math",
+	".*dkjson$",
+	"ThirdParty.*",
 }
 
 local function CheckNameInIgnoreModules(name)
@@ -390,10 +443,11 @@ function Reloader.Begin()
 	envGlobal["setfenv"] = false
 end
 
-function Reloader.DoReloadForRequire(name, useString)
+function Reloader.DoReloadForRequire(name, useString, isSimpleReload)
 	if CheckNameInIgnoreModules(name) then
 		return
 	end
+	if not package.loaded[name] then return end
 	local env = {}
 	setmetatable(env, {__index = envGlobal})
 	local result, msg
@@ -408,7 +462,40 @@ function Reloader.DoReloadForRequire(name, useString)
 	if msg then
 		table.insert(logMsgList, msg)
 	else
-		DoReload(_G, env, package.loaded[name], result, replaceData, name, functionReplaceDict, package.loaded._G, {})
+		DoReload(_G, env, package.loaded[name], result, 
+			replaceData, name, functionReplaceDict, 
+			package.loaded._G, {}, isSimpleReload)
+	end
+end
+
+function Reloader.DoReloadForEntity(name, scriptPath, entityEnv, useString, isSimpleReload)
+	local env = {}
+	setmetatable(env, {__index = entityEnv})
+	entityEnv["setmetatable"] = false
+	entityEnv["setfenv"] = false
+	--scriptPath = string.gsub(scriptPath, "/", ".")
+	local result, msg
+	if useString then
+		result, msg = LoadStringToEnv(useString, env)
+	else
+		result, msg = LoadToEnv(scriptPath, env)
+	end
+	setmetatable(env, nil)
+	entityEnv["setmetatable"] = setmetatable
+	entityEnv["setfenv"] = setfenv
+	local firstIgnored = {
+			[entityEnv._Scene] = true,
+			[entityEnv._Global] = true,
+			[entityEnv._TriggerEvent] = true,
+	}
+	if msg then
+		table.insert(logMsgList, msg)
+	else
+		local oldResult = true
+		if name then oldResult = entityEnv[name] end
+		DoReload(entityEnv, env, oldResult, result, 
+			false, scriptPath, functionReplaceDict, 
+			entityEnv, firstIgnored, isSimpleReload)
 	end
 end
 
@@ -451,19 +538,55 @@ function Reloader.End()
 		end
 		nowLen = #q
 	end
+	return logMsgList
 end
 
-function Reloader.MyReload(name, useString)
+local function TraversalEntityForReload(entityObject, name, useString, isSimpleReload)
+	local env = entityObject:GetDataCache()
+	local entityScriptPath = env.__ScriptFile
+	if entityScriptPath then
+		if entityScriptPath == name or name == nil then
+			Reloader.DoReloadForEntity(nil, entityScriptPath, env, useString, isSimpleReload)
+		end
+	end
+	if env.__CompScriptFile then
+		for k, v in pairs(env.__CompScriptFile) do
+			if v == name or name == nil then
+				Reloader.DoReloadForEntity(k, v, env, useString, isSimpleReload)
+			end
+		end
+	end
+	for key, v in pairs(entityObject._EntityChildList) do
+		TraversalEntityForReload(v, name, useString, isSimpleReload)
+	end
+end
+
+function Reloader.MyReload(name, useString, isSimpleReload)
 	Reloader.Begin()
 	if name then
-		Reloader.DoReloadForRequire(name, useString)
+		Reloader.DoReloadForRequire(name, useString, isSimpleReload)
 	else
 		for key, _ in pairs(package.loaded) do
-			Reloader.DoReloadForRequire(key)
+			Reloader.DoReloadForRequire(key, nil, isSimpleReload)
 		end
+		local DataCacheService = require "Frame.DataCacheService"
+		local entityService = DataCacheService.GetEntityService()
+		for _, entityObject in pairs(entityService._EntityRootMap) do
+			TraversalEntityForReload(entityObject, nil, nil, isSimpleReload)
+		end
+	end
+	Reloader.End()
+	--Log.Warn(DumpTable(logMsgList))
+	return logMsgList
+end
+function Reloader.MyReloadEntity(name, useString, isSimpleReload)
+	Reloader.Begin()
+	local DataCacheService = require "Frame.DataCacheService"
+	local entityService = DataCacheService.GetEntityService()
+	for _, entityObject in pairs(entityService._EntityRootMap) do
+		TraversalEntityForReload(entityObject, name, useString, isSimpleReload)
 	end
 	Reloader.End()
 	return logMsgList
 end
-
 return Reloader
